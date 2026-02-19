@@ -3,71 +3,64 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
-// 1. CONEXÃO COM O BANCO DE DADOS
+// Conexão com o Banco de Dados usando a variável do Render
 const MONGODB_URI = process.env.MONGODB_URI; 
 
 mongoose.connect(MONGODB_URI)
-  .then(() => console.log('🟢 Banco de Dados conectado!'))
+  .then(() => console.log('🟢 Banco de Dados conectado com sucesso!'))
   .catch(err => console.log('🔴 Erro ao conectar ao banco:', err));
 
-// 2. MODELO DO PRODUTO
-const ProdutoSchema = new mongoose.Schema({
+// Modelo do Produto adaptado para 5 mídias (Fotos ou Vídeos)
+const Produto = mongoose.model('Produto', {
     name: String,
     price: Number,
     stock: Number,
-    media: [String]
+    media: [String] // Array para suportar até 5 URLs
 });
-const Produto = mongoose.model('Produto', ProdutoSchema);
 
-// --- ROTAS DA API ---
-
-// ROTA DE LOGIN (Acesso Restrito)
+// Rota de Login Único
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
-    
-    // Validação do seu usuário único
     if (username === 'amauri123' && password === 'matenco123') {
-        res.json({ success: true, message: "Acesso autorizado!" });
+        res.json({ success: true });
     } else {
         res.status(401).json({ success: false, message: "Usuário ou senha incorretos!" });
     }
 });
 
+// Buscar Anúncios
 app.get('/api/produtos', async (req, res) => {
     try {
-        const produtosDoBanco = await Produto.find();
-        const produtosFormatados = produtosDoBanco.map(p => ({
-            id: p._id,
-            name: p.name,
-            price: p.price,
-            stock: p.stock,
-            media: p.media
-        }));
-        res.json(produtosFormatados);
-    } catch (erro) {
-        res.status(500).json({ erro: "Erro ao buscar os hardwares." });
-    }
+        const dados = await Produto.find();
+        res.json(dados.map(p => ({ 
+            id: p._id, 
+            name: p.name, 
+            price: p.price, 
+            stock: p.stock, 
+            media: p.media 
+        })));
+    } catch (e) { res.status(500).send(e); }
 });
 
+// Criar Anúncio
 app.post('/api/produtos', async (req, res) => {
     try {
-        const novoProduto = new Produto(req.body);
-        await novoProduto.save();
-        res.status(201).json({ mensagem: "Produto salvo!", produto: novoProduto });
-    } catch (erro) {
-        res.status(500).json({ erro: "Erro ao salvar." });
-    }
+        const novo = new Produto(req.body);
+        await novo.save();
+        res.status(201).json({ ok: true });
+    } catch (e) { res.status(500).send(e); }
 });
 
+// Remover Anúncio (Função de tirar anúncios)
 app.delete('/api/produtos/:id', async (req, res) => {
     try {
         await Produto.findByIdAndDelete(req.params.id);
-        res.json({ mensagem: "Produto removido!" });
-    } catch (erro) {
-        res.status(500).json({ erro: "Erro ao apagar." });
-    }
+        res.json({ ok: true });
+    } catch (e) { res.status(500).send(e); }
 });
+
+const PORTA = process.env.PORT || 3000;
+app.listen(PORTA, () => console.log(`🚀 Servidor FerriTech rodando na porta ${PORTA}`));
