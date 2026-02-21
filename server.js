@@ -13,12 +13,14 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log('🟢 Banco de Dados conectado com sucesso!'))
   .catch(err => console.log('🔴 Erro ao conectar ao banco:', err));
 
-// Modelo do Produto adaptado para 5 mídias (Fotos ou Vídeos)
+// Modelo do Produto ATUALIZADO com Categoria e Destaque
 const Produto = mongoose.model('Produto', {
     name: String,
     price: Number,
     stock: Number,
-    media: [String] // Array para suportar até 5 URLs
+    media: [String],
+    category: String,       // NOVO: Aba da categoria
+    featuredOrder: Number   // NOVO: Ordem dos destaques
 });
 
 // Rota de Login Único
@@ -31,7 +33,7 @@ app.post('/api/login', (req, res) => {
     }
 });
 
-// Buscar Anúncios
+// Buscar Anúncios (Agora traz a categoria e destaque)
 app.get('/api/produtos', async (req, res) => {
     try {
         const dados = await Produto.find();
@@ -40,7 +42,9 @@ app.get('/api/produtos', async (req, res) => {
             name: p.name, 
             price: p.price, 
             stock: p.stock, 
-            media: p.media 
+            media: p.media,
+            category: p.category,          
+            featuredOrder: p.featuredOrder 
         })));
     } catch (e) { res.status(500).send(e); }
 });
@@ -54,7 +58,15 @@ app.post('/api/produtos', async (req, res) => {
     } catch (e) { res.status(500).send(e); }
 });
 
-// Remover Anúncio (Função de tirar anúncios)
+// Editar Anúncio (NOVO: Função que estava faltando para atualizar)
+app.put('/api/produtos/:id', async (req, res) => {
+    try {
+        await Produto.findByIdAndUpdate(req.params.id, req.body);
+        res.json({ ok: true });
+    } catch (e) { res.status(500).send(e); }
+});
+
+// Remover Anúncio
 app.delete('/api/produtos/:id', async (req, res) => {
     try {
         await Produto.findByIdAndDelete(req.params.id);
