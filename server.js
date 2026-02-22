@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const { MercadoPagoConfig, Preference } = require('mercadopago');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(cors());
@@ -55,7 +56,7 @@ app.post('/api/frete', async (req, res) => {
     }
 });
 
-// 4. ROTA DE PAGAMENTO DO MERCADO PAGO
+// 4. ROTA DE PAGAMENTO E AVISO POR EMAIL
 app.post('/api/checkout', async (req, res) => {
     const { items, shippingPrice, shippingName } = req.body;
     
@@ -89,6 +90,34 @@ app.post('/api/checkout', async (req, res) => {
                 auto_return: "approved",
             }
         });
+
+        // === SISTEMA DE ENVIO DE EMAIL INVISÍVEL ===
+        try {
+            // Só tenta enviar se você configurar as variáveis de e-mail no Render
+            if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+                const transporter = nodemailer.createTransport({
+                    service: 'gmail', 
+                    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+                });
+
+                let itensTxt = items.map(i => `${i.cartQuantity}x ${i.name} (R$ ${Number(i.price).toFixed(2)})`).join('\n');
+                const subtotal = items.reduce((sum, item) => sum + (item.price * item.cartQuantity), 0);
+                const totalGeral = subtotal + shippingPrice;
+
+                const mailOptions = {
+                    from: `"FerriTech Loja" <${process.env.EMAIL_USER}>`,
+                    to: process.env.EMAIL_USER, // Manda o e-mail pra você mesmo
+                    subject: '🚨 NOVO PEDIDO INICIADO - FERRITECH',
+                    text: `Um cliente iniciou um checkout e foi para o Mercado Pago!\n\n🛒 ITENS:\n${itensTxt}\n\n🚚 ENTREGA:\nModo: ${shippingName}\nValor Frete: R$ ${Number(shippingPrice).toFixed(2)}\n\n💰 TOTAL DO PEDIDO: R$ ${totalGeral.toFixed(2)}\n\nAguarde a confirmação de pagamento do Mercado Pago.`
+                };
+
+                // Envia sem travar o cliente
+                transporter.sendMail(mailOptions).catch(err => console.log("Erro no envio do email:", err));
+            }
+        } catch (errEmail) {
+            console.log("Sistema de email não configurado ou falhou.");
+        }
+        // ============================================
 
         res.json({ success: true, init_point: response.init_point });
     } catch (error) {
