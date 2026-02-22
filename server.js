@@ -2,12 +2,12 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const { MercadoPagoConfig, Preference } = require('mercadopago');
-const { calcularPrecoPrazo } = require('correios-brasil');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// 1. CONEXÃO COM BANCO DE DADOS
 const MONGODB_URI = process.env.MONGODB_URI; 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('🟢 Banco de Dados conectado!'))
@@ -18,8 +18,10 @@ const Produto = mongoose.model('Produto', {
     category: String, featuredOrder: Number, description: String, weight: Number
 });
 
+// 2. CONFIGURAÇÃO DO MERCADO PAGO
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN || 'COLOQUE_SEU_TOKEN_AQUI' });
 
+// 3. ROTA DE FRETE INTELIGENTE
 app.post('/api/frete', async (req, res) => {
     const { cepDestino, pesoTotal } = req.body;
     
@@ -48,28 +50,29 @@ app.post('/api/frete', async (req, res) => {
         });
 
     } catch (error) {
+        console.log("Erro no frete:", error);
         res.status(500).json({ success: false, message: "Erro ao calcular frete." });
     }
 });
 
+// 4. ROTA DE PAGAMENTO DO MERCADO PAGO
 app.post('/api/checkout', async (req, res) => {
     const { items, shippingPrice, shippingName } = req.body;
     
     try {
         const preference = new Preference(client);
         
-        // Multiplica o item pela quantidade que está no carrinho
         const mpItems = items.map(item => ({
             title: item.name,
-            unit_price: Number(item.price),
-            quantity: Number(item.cartQuantity || 1), // AQUÍ ESTÁ A MÁGICA DA QUANTIDADE
+            unit_price: Number(Number(item.price).toFixed(2)),
+            quantity: Number(item.cartQuantity || 1),
             currency_id: 'BRL'
         }));
 
         if (shippingPrice > 0) {
             mpItems.push({
                 title: `Frete: ${shippingName}`,
-                unit_price: Number(shippingPrice),
+                unit_price: Number(Number(shippingPrice).toFixed(2)),
                 quantity: 1,
                 currency_id: 'BRL'
             });
@@ -78,17 +81,23 @@ app.post('/api/checkout', async (req, res) => {
         const response = await preference.create({
             body: {
                 items: mpItems,
-                back_urls: { success: "https://ferritech.tec.br", failure: "https://ferritech.tec.br", pending: "https://ferritech.tec.br" },
+                back_urls: { 
+                    success: "https://ferritech.tec.br", 
+                    failure: "https://ferritech.tec.br", 
+                    pending: "https://ferritech.tec.br" 
+                },
                 auto_return: "approved",
             }
         });
 
         res.json({ success: true, init_point: response.init_point });
     } catch (error) {
+        console.error("Erro MP:", error);
         res.status(500).json({ success: false, message: "Erro ao gerar link de pagamento." });
     }
 });
 
+// ROTAS DO PAINEL ADMIN E PRODUTOS 
 app.post('/api/login', (req, res) => {
     if (req.body.username === 'amauri123' && req.body.password === 'matenco123') res.json({ success: true });
     else res.status(401).json({ success: false });
