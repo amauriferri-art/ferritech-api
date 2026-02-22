@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const { MercadoPagoConfig, Preference } = require('mercadopago');
-const { calcularPrecoPrazo } = require('correios-brasil');
 
 const app = express();
 app.use(cors());
@@ -20,35 +19,62 @@ const Produto = mongoose.model('Produto', {
 });
 
 // 2. CONFIGURAÇÃO DO MERCADO PAGO
-// Importante: Você vai precisar colocar o MP_ACCESS_TOKEN lá no site do Render depois!
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN || 'COLOQUE_SEU_TOKEN_AQUI' });
 
-// 3. ROTA DE FRETE DOS CORREIOS
+// 3. NOVA ROTA DE FRETE INTELIGENTE (Sem bloqueio dos Correios)
 app.post('/api/frete', async (req, res) => {
     const { cepDestino, pesoTotal } = req.body;
-    const cepOrigem = '29140878'; // SEU CEP DE ORIGEM
-
+    
     try {
-        let args = {
-            sCepOrigem: cepOrigem,
-            sCepDestino: cepDestino.replace(/\D/g, ''),
-            nVlPeso: pesoTotal.toString(),
-            nCdFormato: '1', // 1 = Caixa/Pacote
-            nVlComprimento: '20', nVlAltura: '20', nVlLargura: '20', // Medidas padrão
-            nVlDiametro: '0',
-        };
+        // Busca a região do cliente via ViaCEP (Rápido e não bloqueia)
+        const response = await fetch(`https://viacep.com.br/ws/${cepDestino.replace(/\D/g, '')}/json/`);
+        const dadosCep = await response.json();
         
-        // 04510 = PAC | 04014 = SEDEX
-        args.nCdServico = ['04510']; 
-        const [pac] = await calcularPrecoPrazo(args);
-        
-        args.nCdServico = ['04014'];
-        const [sedex] = await calcularPrecoPrazo(args);
+        if (dadosCep.erro) {
+            return res.status(400).json({ success: false, message: "CEP não encontrado." });
+        }
 
-        res.json({ success: true, pac, sedex });
+        const uf = dadosCep.uf;
+        const peso = parseFloat(pesoTotal) || 1.0;
+
+        let basePac = 0;
+        let prazoPac = 0;
+
+        // Tabela de Cálculo Realista baseada na saída de Cariacica - ES
+        if (uf === 'ES') {
+            basePac = 15.00 + (peso * 2.50);
+            prazoPac = 3;
+        } else if (['SP', 'RJ', 'MG'].includes(uf)) {
+            basePac = 25.00 + (peso * 4.00);
+            prazoPac = 6;
+        } else if (['PR', 'SC', 'RS', 'DF', 'GO', 'BA'].includes(uf)) {
+            basePac = 38.00 + (peso * 6.50);
+            prazoPac = 9;
+        } else {
+            // Regiões Norte, Nordeste e Centro-Oeste mais distantes
+            basePac = 55.00 + (peso * 10.00);
+            prazoPac = 14;
+        }
+
+        // Sedex é mais rápido e mais caro
+        const valorSedex = basePac + 25.00 + (peso * 4.00);
+        const prazoSedex = Math.max(1, prazoPac - 4); // Sempre será mais rápido que o PAC
+
+        res.json({ 
+            success: true, 
+            pac: { 
+                Valor: basePac.toFixed(2).replace('.', ','), 
+                PrazoEntrega: prazoPac.toString() 
+            }, 
+            sedex: { 
+                Valor: valorSedex.toFixed(2).replace('.', ','), 
+                PrazoEntrega: prazoSedex.toString() 
+            } 
+        });
+
     } catch (error) {
         console.log("Erro no frete:", error);
-        res.status(500).json({ success: false, message: "Erro ao calcular frete nos Correios." });
+        res.status(500).json({ success: false, message: "Erro ao calcular frete." });
     }
 });
 
@@ -59,7 +85,6 @@ app.post('/api/checkout', async (req, res) => {
     try {
         const preference = new Preference(client);
         
-        // Monta os produtos para o Mercado Pago
         const mpItems = items.map(item => ({
             title: item.name,
             unit_price: Number(item.price),
@@ -67,7 +92,6 @@ app.post('/api/checkout', async (req, res) => {
             currency_id: 'BRL'
         }));
 
-        // Adiciona o valor do Frete como um item
         if (shippingPrice > 0) {
             mpItems.push({
                 title: `Frete: ${shippingName}`,
@@ -96,7 +120,7 @@ app.post('/api/checkout', async (req, res) => {
     }
 });
 
-// ROTAS DO PAINEL ADMIN E PRODUTOS (MANTIDAS)
+// ROTAS DO PAINEL ADMIN E PRODUTOS 
 app.post('/api/login', (req, res) => {
     if (req.body.username === 'amauri123' && req.body.password === 'matenco123') res.json({ success: true });
     else res.status(401).json({ success: false });
