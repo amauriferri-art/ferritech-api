@@ -6,14 +6,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Conexão com o Banco de Dados usando a variável do Render
 const MONGODB_URI = process.env.MONGODB_URI; 
 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('🟢 Banco de Dados conectado com sucesso!'))
   .catch(err => console.log('🔴 Erro ao conectar ao banco:', err));
 
-// Modelo do Produto ATUALIZADO com Descrição
+// Modelo do Produto ATUALIZADO com PESO
 const Produto = mongoose.model('Produto', {
     name: String,
     price: Number,
@@ -21,10 +20,10 @@ const Produto = mongoose.model('Produto', {
     media: [String],
     category: String,       
     featuredOrder: Number,
-    description: String     // NOVO: Campo de descrição
+    description: String,
+    weight: Number // NOVO: Peso em Kg para o frete
 });
 
-// Rota de Login Único
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
     if (username === 'amauri123' && password === 'matenco123') {
@@ -34,7 +33,6 @@ app.post('/api/login', (req, res) => {
     }
 });
 
-// Buscar Anúncios (Agora traz a descrição também)
 app.get('/api/produtos', async (req, res) => {
     try {
         const dados = await Produto.find();
@@ -46,12 +44,12 @@ app.get('/api/produtos', async (req, res) => {
             media: p.media,
             category: p.category,          
             featuredOrder: p.featuredOrder,
-            description: p.description // NOVO
+            description: p.description,
+            weight: p.weight // NOVO
         })));
     } catch (e) { res.status(500).send(e); }
 });
 
-// Criar Anúncio
 app.post('/api/produtos', async (req, res) => {
     try {
         const novo = new Produto(req.body);
@@ -60,7 +58,6 @@ app.post('/api/produtos', async (req, res) => {
     } catch (e) { res.status(500).send(e); }
 });
 
-// Editar Anúncio
 app.put('/api/produtos/:id', async (req, res) => {
     try {
         await Produto.findByIdAndUpdate(req.params.id, req.body);
@@ -68,7 +65,6 @@ app.put('/api/produtos/:id', async (req, res) => {
     } catch (e) { res.status(500).send(e); }
 });
 
-// Remover Anúncio
 app.delete('/api/produtos/:id', async (req, res) => {
     try {
         await Produto.findByIdAndDelete(req.params.id);
