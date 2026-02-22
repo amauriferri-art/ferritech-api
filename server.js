@@ -1,7 +1,21 @@
+Fala, meu consagrado! Você tocou no ponto exato que separa os "amadores" dos "profissionais".
+
+O que você estava usando era o Checkout Pro (que redireciona para o site do Mercado Pago e força o login). O que você quer agora chama-se Checkout Transparente. Com ele, a tela de preencher o Cartão de Crédito ou gerar o código PIX aparece dentro do seu próprio site, sem o cliente precisar sair da FerriTech ou ter conta no Mercado Pago!
+
+Para fazer essa mágica funcionar, nós vamos implementar o sistema de "Bricks" do Mercado Pago.
+
+Aqui estão os dois arquivos que você precisa atualizar.
+
+1. server.js (O Motor do Checkout Transparente)
+O servidor agora processa o cartão ou o PIX diretamente, em vez de apenas gerar um link. Substitua tudo no GitHub por este código:
+
+JavaScript
+
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const { MercadoPagoConfig, Preference } = require('mercadopago');
+// Atualizado: Usando a classe Payment para Checkout Transparente
+const { MercadoPagoConfig, Payment } = require('mercadopago');
 const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
 
@@ -26,14 +40,15 @@ const Usuario = mongoose.model('Usuario', {
 
 const Pedido = mongoose.model('Pedido', {
     usuarioId: String, nomeCliente: String, itens: Array, metodoEntrega: String, valorFrete: Number, total: Number,
-    status: { type: String, default: 'Pendente' }, // Pendente, Pago, Enviado, Entregue
+    status: { type: String, default: 'Pendente' }, 
     dataPedido: { type: Date, default: Date.now }
 });
 // ====================================================
 
+// O seu Access Token do Render
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN || 'COLOQUE_SEU_TOKEN_AQUI' });
 
-// --- AUTENTICAÇÃO DE CLIENTES ---
+// --- AUTENTICAÇÃO ---
 app.post('/api/register', async (req, res) => {
     try {
         const { nome, email, senha } = req.body;
@@ -62,64 +77,55 @@ app.post('/api/login-cliente', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, message: "Erro no login." }); }
 });
 
-// --- ROTA DE PAGAMENTO E GERAÇÃO DE PEDIDO ---
-app.post('/api/checkout', async (req, res) => {
-    const { items, shippingPrice, shippingName, userId, userName } = req.body;
+// --- ROTA NOVA: PROCESSAMENTO DIRETO DO PAGAMENTO (CHECKOUT TRANSPARENTE) ---
+app.post('/api/process_payment', async (req, res) => {
+    const { paymentData, items, shippingPrice, shippingName, userId, userName } = req.body;
     
     try {
-        // 1. Salva o pedido no Banco de Dados
+        const payment = new Payment(client);
+        
+        // Garante que a descrição vá para a sua fatura
+        paymentData.description = `Pedido FerriTech - ${userName}`;
+
+        // Executa a cobrança no Mercado Pago
+        const response = await payment.create({ body: paymentData });
+
+        // Calcula os totais
         const subtotal = items.reduce((sum, item) => sum + (item.price * item.cartQuantity), 0);
         const totalGeral = subtotal + shippingPrice;
         
+        // Salva o pedido no banco de dados
+        const statusPedido = response.status === 'approved' ? 'Pago' : 'Pendente';
         const novoPedido = new Pedido({
             usuarioId: userId, nomeCliente: userName, itens: items,
-            metodoEntrega: shippingName, valorFrete: shippingPrice, total: totalGeral
+            metodoEntrega: shippingName, valorFrete: shippingPrice, total: totalGeral,
+            status: statusPedido
         });
         await novoPedido.save();
 
-        // 2. Gera o link do Mercado Pago
-        const preference = new Preference(client);
-        const mpItems = items.map(item => ({
-            title: item.name, unit_price: Number(Number(item.price).toFixed(2)), quantity: Number(item.cartQuantity || 1), currency_id: 'BRL'
-        }));
-        if (shippingPrice > 0) {
-            mpItems.push({ title: `Frete: ${shippingName}`, unit_price: Number(Number(shippingPrice).toFixed(2)), quantity: 1, currency_id: 'BRL' });
-        }
-
-        const response = await preference.create({
-            body: { items: mpItems, back_urls: { success: "https://ferritech.tec.br/conta.html", failure: "https://ferritech.tec.br/conta.html", pending: "https://ferritech.tec.br/conta.html" }, auto_return: "approved" }
-        });
-
-        // Email pro Admin
+        // Envia email de notificação pra você
         try {
             if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
                 const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS } });
                 transporter.sendMail({
                     from: `"FerriTech" <${process.env.EMAIL_USER}>`, to: process.env.EMAIL_USER, subject: `🚨 NOVO PEDIDO: ${userName}`,
-                    text: `O cliente ${userName} fez um pedido!\nValor: R$ ${totalGeral.toFixed(2)}\nVerifique o painel Admin.`
+                    text: `O cliente ${userName} finalizou o checkout transparente!\nStatus: ${statusPedido}\nValor: R$ ${totalGeral.toFixed(2)}\nVerifique o painel Admin.`
                 }).catch(e=>{});
             }
         } catch (e) {}
 
-        res.json({ success: true, init_point: response.init_point });
-    } catch (error) { res.status(500).json({ success: false, message: "Erro ao gerar pagamento." }); }
+        // Verifica se é PIX para devolver a tela de pagamento rápido
+        const isPix = paymentData.payment_method_id === 'pix';
+        const pixUrl = isPix && response.point_of_interaction ? response.point_of_interaction.transaction_data.ticket_url : null;
+
+        res.json({ success: true, status: response.status, pixUrl: pixUrl });
+    } catch (error) { 
+        console.error("Erro MP Transparente:", error);
+        res.status(500).json({ success: false, message: "Erro ao processar pagamento." }); 
+    }
 });
 
-// --- ROTAS DE GESTÃO DE PEDIDOS ---
-// Busca pedidos do cliente logado
-app.get('/api/meus-pedidos/:userId', async (req, res) => {
-    try { const pedidos = await Pedido.find({ usuarioId: req.params.userId }).sort({ dataPedido: -1 }); res.json(pedidos); } catch (e) { res.status(500).send(e); }
-});
-// Busca TODOS os pedidos (Para o Painel Admin)
-app.get('/api/admin/pedidos', async (req, res) => {
-    try { const pedidos = await Pedido.find().sort({ dataPedido: -1 }); res.json(pedidos); } catch (e) { res.status(500).send(e); }
-});
-// Atualiza o Status do Pedido (Painel Admin)
-app.put('/api/admin/pedidos/:id/status', async (req, res) => {
-    try { await Pedido.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ success: true }); } catch (e) { res.status(500).send(e); }
-});
-
-// --- ROTA DE FRETE DOS CORREIOS ---
+// --- ROTA DE FRETE ---
 app.post('/api/frete', async (req, res) => {
     const { cepDestino, pesoTotal } = req.body;
     try {
@@ -135,7 +141,10 @@ app.post('/api/frete', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false }); }
 });
 
-// ROTAS DO PAINEL ADMIN (MANTIDAS) E PRODUTOS
+// --- DEMAIS ROTAS ---
+app.get('/api/meus-pedidos/:userId', async (req, res) => { try { const pedidos = await Pedido.find({ usuarioId: req.params.userId }).sort({ dataPedido: -1 }); res.json(pedidos); } catch (e) { res.status(500).send(e); } });
+app.get('/api/admin/pedidos', async (req, res) => { try { const pedidos = await Pedido.find().sort({ dataPedido: -1 }); res.json(pedidos); } catch (e) { res.status(500).send(e); } });
+app.put('/api/admin/pedidos/:id/status', async (req, res) => { try { await Pedido.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ success: true }); } catch (e) { res.status(500).send(e); } });
 app.post('/api/login', (req, res) => { if (req.body.username === 'amauri123' && req.body.password === 'matenco123') res.json({ success: true }); else res.status(401).json({ success: false }); });
 app.get('/api/produtos', async (req, res) => { try { const dados = await Produto.find(); res.json(dados.map(p => ({ id: p._id, name: p.name, price: p.price, stock: p.stock, media: p.media, category: p.category, featuredOrder: p.featuredOrder, description: p.description, weight: p.weight }))); } catch (e) { res.status(500).send(e); } });
 app.post('/api/produtos', async (req, res) => { try { await new Produto(req.body).save(); res.status(201).json({ ok: true }); } catch (e) { res.status(500).send(e); } });
