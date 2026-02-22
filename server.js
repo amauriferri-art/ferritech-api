@@ -25,7 +25,10 @@ const Usuario = mongoose.model('Usuario', {
 });
 
 const Pedido = mongoose.model('Pedido', {
-    usuarioId: String, nomeCliente: String, itens: Array, metodoEntrega: String, valorFrete: Number, total: Number,
+    usuarioId: String, nomeCliente: String, itens: Array, 
+    metodoEntrega: String, valorFrete: Number, total: Number,
+    endereco: Object, // NOVO: Guarda o endereço do cliente
+    pagamentoId: String, // NOVO: Guarda o ID do Mercado Pago para atualizar sozinho
     status: { type: String, default: 'Pendente' }, 
     dataPedido: { type: Date, default: Date.now }
 });
@@ -33,16 +36,13 @@ const Pedido = mongoose.model('Pedido', {
 
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN || 'COLOQUE_SEU_TOKEN_AQUI' });
 
-// --- AUTENTICAÇÃO ---
 app.post('/api/register', async (req, res) => {
     try {
         const { nome, email, senha } = req.body;
         const existe = await Usuario.findOne({ email });
         if (existe) return res.status(400).json({ success: false, message: "E-mail já cadastrado!" });
-        
         const salt = await bcrypt.genSalt(10);
         const senhaHash = await bcrypt.hash(senha, salt);
-        
         const novoUsuario = new Usuario({ nome, email, senha: senhaHash });
         await novoUsuario.save();
         res.json({ success: true, userId: novoUsuario._id, nome: novoUsuario.nome, email: novoUsuario.email });
@@ -54,25 +54,25 @@ app.post('/api/login-cliente', async (req, res) => {
         const { email, senha } = req.body;
         const usuario = await Usuario.findOne({ email });
         if (!usuario) return res.status(400).json({ success: false, message: "Usuário não encontrado." });
-        
         const senhaValida = await bcrypt.compare(senha, usuario.senha);
         if (!senhaValida) return res.status(400).json({ success: false, message: "Senha incorreta." });
-        
         res.json({ success: true, userId: usuario._id, nome: usuario.nome, email: usuario.email });
     } catch (e) { res.status(500).json({ success: false, message: "Erro no login." }); }
 });
 
-// --- PROCESSAMENTO DO PAGAMENTO TRANSPARENTE E PIX ---
+// --- ROTA DE PAGAMENTO ---
 app.post('/api/process_payment', async (req, res) => {
-    const { paymentData, items, shippingPrice, shippingName, userId, userName } = req.body;
+    const { paymentData, items, shippingPrice, shippingName, userId, userName, endereco } = req.body;
     
     try {
         const payment = new Payment(client);
         paymentData.description = `Pedido FerriTech - ${userName}`;
+        
+        // Configura o Webhook automático para essa URL
+        paymentData.notification_url = "https://ferritech-api.onrender.com/api/webhook";
 
         const response = await payment.create({ body: paymentData });
 
-        // Identifica se é PIX para devolver o QR Code
         const isPix = paymentData.payment_method_id === 'pix';
         const qrCode = isPix && response.point_of_interaction ? response.point_of_interaction.transaction_data.qr_code : null;
         const qrCodeBase64 = isPix && response.point_of_interaction ? response.point_of_interaction.transaction_data.qr_code_base64 : null;
@@ -81,38 +81,55 @@ app.post('/api/process_payment', async (req, res) => {
         const totalGeral = subtotal + shippingPrice;
         
         const statusPedido = response.status === 'approved' ? 'Pago' : 'Pendente';
+        
         const novoPedido = new Pedido({
             usuarioId: userId, nomeCliente: userName, itens: items,
             metodoEntrega: shippingName, valorFrete: shippingPrice, total: totalGeral,
+            endereco: endereco,
+            pagamentoId: response.id.toString(), // Salva o ID do MP
             status: statusPedido
         });
         await novoPedido.save();
 
-        try {
-            if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-                const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS } });
-                transporter.sendMail({
-                    from: `"FerriTech" <${process.env.EMAIL_USER}>`, to: process.env.EMAIL_USER, subject: `🚨 NOVO PEDIDO: ${userName}`,
-                    text: `O cliente ${userName} finalizou o checkout transparente!\nStatus: ${statusPedido}\nMetodo: ${paymentData.payment_method_id}\nValor: R$ ${totalGeral.toFixed(2)}\nVerifique o painel Admin.`
-                }).catch(e=>{});
-            }
-        } catch (e) {}
-
-        // Retorna sucesso, status e os dados do PIX (se for PIX)
-        res.json({ 
-            success: true, 
-            status: response.status, 
-            isPix: isPix,
-            qrCode: qrCode,
-            qrCodeBase64: qrCodeBase64
-        });
+        res.json({ success: true, status: response.status, isPix: isPix, qrCode: qrCode, qrCodeBase64: qrCodeBase64 });
     } catch (error) { 
-        console.error("Erro MP Transparente:", error);
         res.status(500).json({ success: false, message: "Erro ao processar pagamento." }); 
     }
 });
 
-// --- ROTA DE FRETE E DEMAIS ROTAS ---
+// --- ESCUTA AUTOMÁTICA DO MERCADO PAGO (WEBHOOK) ---
+app.post('/api/webhook', async (req, res) => {
+    // O Mercado Pago manda requisições aqui quando o status do pagamento muda
+    try {
+        const action = req.body.action || req.body.type;
+        if (action === 'payment.updated' || action === 'payment') {
+            const paymentId = req.body.data.id;
+            
+            // Vai no MP consultar o status real atualizado
+            const payment = new Payment(client);
+            const paymentInfo = await payment.get({ id: paymentId });
+            
+            if (paymentInfo.status === 'approved') {
+                // Atualiza o pedido sozinho no banco de dados!
+                await Pedido.findOneAndUpdate({ pagamentoId: paymentId.toString() }, { status: 'Pago' });
+                
+                // Dispara o email avisando você que caiu o dinheiro!
+                if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+                    const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS } });
+                    transporter.sendMail({
+                        from: `"FerriTech" <${process.env.EMAIL_USER}>`, to: process.env.EMAIL_USER, subject: `💰 PAGAMENTO APROVADO!`,
+                        text: `Um pedido foi pago e aprovado automaticamente.\nVerifique o painel para gerar a etiqueta de envio.`
+                    }).catch(e=>{});
+                }
+            }
+        }
+        res.sendStatus(200); // MP exige que a gente responda 200 OK rápido
+    } catch (err) {
+        console.error("Erro no webhook:", err);
+        res.sendStatus(500);
+    }
+});
+
 app.post('/api/frete', async (req, res) => {
     const { cepDestino, pesoTotal } = req.body;
     try {
@@ -124,7 +141,14 @@ app.post('/api/frete', async (req, res) => {
         else if (['SP', 'RJ', 'MG'].includes(uf)) { basePac = 25.00 + (peso * 4.00); prazoPac = 6; } 
         else { basePac = 40.00 + (peso * 8.00); prazoPac = 10; }
         const valorSedex = basePac + 25.00 + (peso * 4.00);
-        res.json({ success: true, pac: { Valor: basePac.toFixed(2).replace('.', ','), PrazoEntrega: prazoPac.toString() }, sedex: { Valor: valorSedex.toFixed(2).replace('.', ','), PrazoEntrega: Math.max(1, prazoPac - 4).toString() } });
+        
+        // Devolve os dados do CEP junto para a loja preencher
+        res.json({ 
+            success: true, 
+            pac: { Valor: basePac.toFixed(2).replace('.', ','), PrazoEntrega: prazoPac.toString() }, 
+            sedex: { Valor: valorSedex.toFixed(2).replace('.', ','), PrazoEntrega: Math.max(1, prazoPac - 4).toString() },
+            enderecoInfo: dadosCep // Manda Rua, Bairro, etc pro frontend
+        });
     } catch (error) { res.status(500).json({ success: false }); }
 });
 
