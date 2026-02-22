@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
-// Atualizado: Usando a classe Payment para Checkout Transparente
 const { MercadoPagoConfig, Payment } = require('mercadopago');
 const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
@@ -32,7 +31,6 @@ const Pedido = mongoose.model('Pedido', {
 });
 // ====================================================
 
-// O seu Access Token do Render
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN || 'COLOQUE_SEU_TOKEN_AQUI' });
 
 // --- AUTENTICAÇÃO ---
@@ -47,7 +45,7 @@ app.post('/api/register', async (req, res) => {
         
         const novoUsuario = new Usuario({ nome, email, senha: senhaHash });
         await novoUsuario.save();
-        res.json({ success: true, userId: novoUsuario._id, nome: novoUsuario.nome });
+        res.json({ success: true, userId: novoUsuario._id, nome: novoUsuario.nome, email: novoUsuario.email });
     } catch (e) { res.status(500).json({ success: false, message: "Erro ao criar conta." }); }
 });
 
@@ -60,28 +58,28 @@ app.post('/api/login-cliente', async (req, res) => {
         const senhaValida = await bcrypt.compare(senha, usuario.senha);
         if (!senhaValida) return res.status(400).json({ success: false, message: "Senha incorreta." });
         
-        res.json({ success: true, userId: usuario._id, nome: usuario.nome });
+        res.json({ success: true, userId: usuario._id, nome: usuario.nome, email: usuario.email });
     } catch (e) { res.status(500).json({ success: false, message: "Erro no login." }); }
 });
 
-// --- ROTA NOVA: PROCESSAMENTO DIRETO DO PAGAMENTO (CHECKOUT TRANSPARENTE) ---
+// --- PROCESSAMENTO DO PAGAMENTO TRANSPARENTE E PIX ---
 app.post('/api/process_payment', async (req, res) => {
     const { paymentData, items, shippingPrice, shippingName, userId, userName } = req.body;
     
     try {
         const payment = new Payment(client);
-        
-        // Garante que a descrição vá para a sua fatura
         paymentData.description = `Pedido FerriTech - ${userName}`;
 
-        // Executa a cobrança no Mercado Pago
         const response = await payment.create({ body: paymentData });
 
-        // Calcula os totais
+        // Identifica se é PIX para devolver o QR Code
+        const isPix = paymentData.payment_method_id === 'pix';
+        const qrCode = isPix && response.point_of_interaction ? response.point_of_interaction.transaction_data.qr_code : null;
+        const qrCodeBase64 = isPix && response.point_of_interaction ? response.point_of_interaction.transaction_data.qr_code_base64 : null;
+
         const subtotal = items.reduce((sum, item) => sum + (item.price * item.cartQuantity), 0);
         const totalGeral = subtotal + shippingPrice;
         
-        // Salva o pedido no banco de dados
         const statusPedido = response.status === 'approved' ? 'Pago' : 'Pendente';
         const novoPedido = new Pedido({
             usuarioId: userId, nomeCliente: userName, itens: items,
@@ -90,29 +88,31 @@ app.post('/api/process_payment', async (req, res) => {
         });
         await novoPedido.save();
 
-        // Envia email de notificação pra você
         try {
             if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
                 const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS } });
                 transporter.sendMail({
                     from: `"FerriTech" <${process.env.EMAIL_USER}>`, to: process.env.EMAIL_USER, subject: `🚨 NOVO PEDIDO: ${userName}`,
-                    text: `O cliente ${userName} finalizou o checkout transparente!\nStatus: ${statusPedido}\nValor: R$ ${totalGeral.toFixed(2)}\nVerifique o painel Admin.`
+                    text: `O cliente ${userName} finalizou o checkout transparente!\nStatus: ${statusPedido}\nMetodo: ${paymentData.payment_method_id}\nValor: R$ ${totalGeral.toFixed(2)}\nVerifique o painel Admin.`
                 }).catch(e=>{});
             }
         } catch (e) {}
 
-        // Verifica se é PIX para devolver a tela de pagamento rápido
-        const isPix = paymentData.payment_method_id === 'pix';
-        const pixUrl = isPix && response.point_of_interaction ? response.point_of_interaction.transaction_data.ticket_url : null;
-
-        res.json({ success: true, status: response.status, pixUrl: pixUrl });
+        // Retorna sucesso, status e os dados do PIX (se for PIX)
+        res.json({ 
+            success: true, 
+            status: response.status, 
+            isPix: isPix,
+            qrCode: qrCode,
+            qrCodeBase64: qrCodeBase64
+        });
     } catch (error) { 
         console.error("Erro MP Transparente:", error);
         res.status(500).json({ success: false, message: "Erro ao processar pagamento." }); 
     }
 });
 
-// --- ROTA DE FRETE ---
+// --- ROTA DE FRETE E DEMAIS ROTAS ---
 app.post('/api/frete', async (req, res) => {
     const { cepDestino, pesoTotal } = req.body;
     try {
@@ -128,7 +128,6 @@ app.post('/api/frete', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false }); }
 });
 
-// --- DEMAIS ROTAS ---
 app.get('/api/meus-pedidos/:userId', async (req, res) => { try { const pedidos = await Pedido.find({ usuarioId: req.params.userId }).sort({ dataPedido: -1 }); res.json(pedidos); } catch (e) { res.status(500).send(e); } });
 app.get('/api/admin/pedidos', async (req, res) => { try { const pedidos = await Pedido.find().sort({ dataPedido: -1 }); res.json(pedidos); } catch (e) { res.status(500).send(e); } });
 app.put('/api/admin/pedidos/:id/status', async (req, res) => { try { await Pedido.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ success: true }); } catch (e) { res.status(500).send(e); } });
