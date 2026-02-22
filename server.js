@@ -13,14 +13,15 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log('🟢 Banco de Dados conectado com sucesso!'))
   .catch(err => console.log('🔴 Erro ao conectar ao banco:', err));
 
-// Modelo do Produto ATUALIZADO com Categoria e Destaque
+// Modelo do Produto ATUALIZADO com Descrição
 const Produto = mongoose.model('Produto', {
     name: String,
     price: Number,
     stock: Number,
     media: [String],
-    category: String,       // NOVO: Aba da categoria
-    featuredOrder: Number   // NOVO: Ordem dos destaques
+    category: String,       
+    featuredOrder: Number,
+    description: String     // NOVO: Campo de descrição
 });
 
 // Rota de Login Único
@@ -33,7 +34,7 @@ app.post('/api/login', (req, res) => {
     }
 });
 
-// Buscar Anúncios (Agora traz a categoria e destaque)
+// Buscar Anúncios (Agora traz a descrição também)
 app.get('/api/produtos', async (req, res) => {
     try {
         const dados = await Produto.find();
@@ -44,7 +45,8 @@ app.get('/api/produtos', async (req, res) => {
             stock: p.stock, 
             media: p.media,
             category: p.category,          
-            featuredOrder: p.featuredOrder 
+            featuredOrder: p.featuredOrder,
+            description: p.description // NOVO
         })));
     } catch (e) { res.status(500).send(e); }
 });
@@ -58,7 +60,7 @@ app.post('/api/produtos', async (req, res) => {
     } catch (e) { res.status(500).send(e); }
 });
 
-// Editar Anúncio (NOVO: Função que estava faltando para atualizar)
+// Editar Anúncio
 app.put('/api/produtos/:id', async (req, res) => {
     try {
         await Produto.findByIdAndUpdate(req.params.id, req.body);
