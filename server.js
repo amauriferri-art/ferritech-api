@@ -1,16 +1,3 @@
-Fala, meu consagrado! Você tocou no ponto exato que separa os "amadores" dos "profissionais".
-
-O que você estava usando era o Checkout Pro (que redireciona para o site do Mercado Pago e força o login). O que você quer agora chama-se Checkout Transparente. Com ele, a tela de preencher o Cartão de Crédito ou gerar o código PIX aparece dentro do seu próprio site, sem o cliente precisar sair da FerriTech ou ter conta no Mercado Pago!
-
-Para fazer essa mágica funcionar, nós vamos implementar o sistema de "Bricks" do Mercado Pago.
-
-Aqui estão os dois arquivos que você precisa atualizar.
-
-1. server.js (O Motor do Checkout Transparente)
-O servidor agora processa o cartão ou o PIX diretamente, em vez de apenas gerar um link. Substitua tudo no GitHub por este código:
-
-JavaScript
-
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
