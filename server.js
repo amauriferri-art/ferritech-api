@@ -27,8 +27,9 @@ const Usuario = mongoose.model('Usuario', {
 const Pedido = mongoose.model('Pedido', {
     usuarioId: String, nomeCliente: String, itens: Array, 
     metodoEntrega: String, valorFrete: Number, total: Number,
-    endereco: Object, // NOVO: Guarda o endereço do cliente
-    pagamentoId: String, // NOVO: Guarda o ID do Mercado Pago para atualizar sozinho
+    endereco: Object, 
+    pagamentoId: String, 
+    codigoRastreio: { type: String, default: '' }, // NOVO: Guarda o Rastreio
     status: { type: String, default: 'Pendente' }, 
     dataPedido: { type: Date, default: Date.now }
 });
@@ -60,60 +61,43 @@ app.post('/api/login-cliente', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, message: "Erro no login." }); }
 });
 
-// --- ROTA DE PAGAMENTO ---
 app.post('/api/process_payment', async (req, res) => {
     const { paymentData, items, shippingPrice, shippingName, userId, userName, endereco } = req.body;
-    
     try {
         const payment = new Payment(client);
         paymentData.description = `Pedido FerriTech - ${userName}`;
-        
-        // Configura o Webhook automático para essa URL
         paymentData.notification_url = "https://ferritech-api.onrender.com/api/webhook";
 
         const response = await payment.create({ body: paymentData });
-
         const isPix = paymentData.payment_method_id === 'pix';
         const qrCode = isPix && response.point_of_interaction ? response.point_of_interaction.transaction_data.qr_code : null;
         const qrCodeBase64 = isPix && response.point_of_interaction ? response.point_of_interaction.transaction_data.qr_code_base64 : null;
 
         const subtotal = items.reduce((sum, item) => sum + (item.price * item.cartQuantity), 0);
         const totalGeral = subtotal + shippingPrice;
-        
         const statusPedido = response.status === 'approved' ? 'Pago' : 'Pendente';
         
         const novoPedido = new Pedido({
             usuarioId: userId, nomeCliente: userName, itens: items,
             metodoEntrega: shippingName, valorFrete: shippingPrice, total: totalGeral,
-            endereco: endereco,
-            pagamentoId: response.id.toString(), // Salva o ID do MP
-            status: statusPedido
+            endereco: endereco, pagamentoId: response.id.toString(), status: statusPedido
         });
         await novoPedido.save();
 
         res.json({ success: true, status: response.status, isPix: isPix, qrCode: qrCode, qrCodeBase64: qrCodeBase64 });
-    } catch (error) { 
-        res.status(500).json({ success: false, message: "Erro ao processar pagamento." }); 
-    }
+    } catch (error) { res.status(500).json({ success: false, message: "Erro ao processar pagamento." }); }
 });
 
-// --- ESCUTA AUTOMÁTICA DO MERCADO PAGO (WEBHOOK) ---
 app.post('/api/webhook', async (req, res) => {
-    // O Mercado Pago manda requisições aqui quando o status do pagamento muda
     try {
         const action = req.body.action || req.body.type;
         if (action === 'payment.updated' || action === 'payment') {
             const paymentId = req.body.data.id;
-            
-            // Vai no MP consultar o status real atualizado
             const payment = new Payment(client);
             const paymentInfo = await payment.get({ id: paymentId });
             
             if (paymentInfo.status === 'approved') {
-                // Atualiza o pedido sozinho no banco de dados!
                 await Pedido.findOneAndUpdate({ pagamentoId: paymentId.toString() }, { status: 'Pago' });
-                
-                // Dispara o email avisando você que caiu o dinheiro!
                 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
                     const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS } });
                     transporter.sendMail({
@@ -123,11 +107,8 @@ app.post('/api/webhook', async (req, res) => {
                 }
             }
         }
-        res.sendStatus(200); // MP exige que a gente responda 200 OK rápido
-    } catch (err) {
-        console.error("Erro no webhook:", err);
-        res.sendStatus(500);
-    }
+        res.sendStatus(200); 
+    } catch (err) { res.sendStatus(500); }
 });
 
 app.post('/api/frete', async (req, res) => {
@@ -141,15 +122,19 @@ app.post('/api/frete', async (req, res) => {
         else if (['SP', 'RJ', 'MG'].includes(uf)) { basePac = 25.00 + (peso * 4.00); prazoPac = 6; } 
         else { basePac = 40.00 + (peso * 8.00); prazoPac = 10; }
         const valorSedex = basePac + 25.00 + (peso * 4.00);
-        
-        // Devolve os dados do CEP junto para a loja preencher
-        res.json({ 
-            success: true, 
-            pac: { Valor: basePac.toFixed(2).replace('.', ','), PrazoEntrega: prazoPac.toString() }, 
-            sedex: { Valor: valorSedex.toFixed(2).replace('.', ','), PrazoEntrega: Math.max(1, prazoPac - 4).toString() },
-            enderecoInfo: dadosCep // Manda Rua, Bairro, etc pro frontend
-        });
+        res.json({ success: true, pac: { Valor: basePac.toFixed(2).replace('.', ','), PrazoEntrega: prazoPac.toString() }, sedex: { Valor: valorSedex.toFixed(2).replace('.', ','), PrazoEntrega: Math.max(1, prazoPac - 4).toString() }, enderecoInfo: dadosCep });
     } catch (error) { res.status(500).json({ success: false }); }
+});
+
+// NOVA ROTA: SALVAR RASTREIO E ATUALIZAR STATUS PARA "ENVIADO"
+app.put('/api/admin/pedidos/:id/rastreio', async (req, res) => {
+    try { 
+        await Pedido.findByIdAndUpdate(req.params.id, { 
+            codigoRastreio: req.body.rastreio, 
+            status: 'Enviado' // Atualiza o status automaticamente
+        }); 
+        res.json({ success: true }); 
+    } catch (e) { res.status(500).send(e); }
 });
 
 app.get('/api/meus-pedidos/:userId', async (req, res) => { try { const pedidos = await Pedido.find({ usuarioId: req.params.userId }).sort({ dataPedido: -1 }); res.json(pedidos); } catch (e) { res.status(500).send(e); } });
